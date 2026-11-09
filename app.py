@@ -1016,8 +1016,6 @@ st.markdown("B.Tech CSE with Cybersecurity")
 st.markdown("SRM Institute of Science and Technology, Tiruchirappalli campus")
     with fcol2:
         st.info("💡 **Tip:** Use the **Quick Molecule Switcher** in the left sidebar or type any custom SMILES string in the laboratory modules.")
-
-
 # ============================================================
 # PAGE 2: THEORY PAGE
 # ============================================================
