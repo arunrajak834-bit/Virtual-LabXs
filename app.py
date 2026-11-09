@@ -1061,10 +1061,10 @@ if page == "🏠 Home & Overview":
     with fcol1:
         st.markdown("#### 👨‍🏫 Original Curriculum & Concept")
         st.markdown("""
-        **Dr. R. Subramanian**  
-        Assistant Professor, Division of Chemistry, School of Sciences  
-        Faculty of Engineering and Technology, SRM Institute of Science and Technology, Tiruchirappalli  
-        📧 **Contact:** `rsmani84@gmail.com`
+        **Arun and Sujan**  
+        Student  
+        Student of Engineering and Technology, SRM Institute of Science and Technology, Tiruchirappalli  
+        📧 **Contact:** `arunrajak834@gmail.com`
         """)
     with fcol2:
         st.info("💡 **Tip:** Use the **Quick Molecule Switcher** in the left sidebar or type any custom SMILES string in the laboratory modules.")
