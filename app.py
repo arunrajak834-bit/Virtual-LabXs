@@ -1,48 +1,50 @@
-import os
-import io
-import math
 import hashlib
+import math
+import os
 import tempfile
 from datetime import datetime, timezone
 from io import BytesIO
+from xml.sax.saxutils import escape
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+import py3Dmol
 import streamlit as st
 import streamlit.components.v1 as components
 
 # RDKit Imports
 from rdkit import Chem, DataStructs
 from rdkit.Chem import (
-    Draw,
     AllChem,
-    Descriptors,
     Crippen,
+    Descriptors,
+    Draw,
     Lipinski,
-    rdMolDescriptors
+    rdMolDescriptors,
 )
 
-# 3D Visualization
-import py3Dmol
+try:
+    from rdkit.Chem import rdFingerprintGenerator
+except ImportError:
+    rdFingerprintGenerator = None
 
 # PDF Generation (ReportLab)
-from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 from reportlab.lib.colors import HexColor
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
 from reportlab.platypus import (
-    SimpleDocTemplate,
+    Image,
+    PageBreak,
     Paragraph,
+    SimpleDocTemplate,
     Spacer,
     Table,
     TableStyle,
-    PageBreak,
-    Image,
-    Preformatted
 )
-from reportlab.lib.units import inch
 
 
 # ============================================================
@@ -183,7 +185,7 @@ FUNCTIONAL_GROUPS_SMARTS = {
     "Thiol / Sulfide (-SH / -S-)": "[#16X2]"
 }
 
-# Initialize Session State
+# Initialize Persistent Session State
 if "active_smiles" not in st.session_state:
     st.session_state.active_smiles = "CC(=O)Oc1ccccc1C(=O)O"  # Default: Aspirin
 
@@ -194,11 +196,19 @@ if "assessment_score" not in st.session_state:
     st.session_state.assessment_score = None
 
 
-def load_shared_example():
-    """Load the selected example into the shared SMILES field."""
-    st.session_state.active_smiles = EXAMPLE_MOLECULES[
-        st.session_state.selected_example
-    ]
+def load_shared_example(source_key: str = "sidebar_selected_example"):
+    """Synchronize the selected preset molecule into the shared SMILES state."""
+    chosen = st.session_state.get(source_key, st.session_state.selected_example)
+    if chosen in EXAMPLE_MOLECULES:
+        st.session_state.selected_example = chosen
+        st.session_state.active_smiles = EXAMPLE_MOLECULES[chosen]
+        st.session_state.smiles_input_widget = EXAMPLE_MOLECULES[chosen]
+
+
+def sync_smiles_from_input():
+    """Persist manual SMILES edits from page text_input across page switches."""
+    if "smiles_input_widget" in st.session_state:
+        st.session_state.active_smiles = st.session_state.smiles_input_widget
 
 
 # ============================================================
@@ -214,6 +224,14 @@ def get_molecule(smiles: str):
         return mol
     except Exception:
         return None
+
+
+def compute_morgan_fp(mol, radius: int = 2, n_bits: int = 2048):
+    """Compute Morgan (ECFP4) bit vector using modern RDKit API with fallback."""
+    if rdFingerprintGenerator is not None:
+        gen = rdFingerprintGenerator.GetMorganGenerator(radius=radius, fpSize=n_bits)
+        return gen.GetFingerprint(mol)
+    return rdMolDescriptors.GetMorganFingerprintAsBitVect(mol, radius=radius, nBits=n_bits)
 
 
 def calculate_bond_and_hybridization_info(mol):
@@ -425,7 +443,7 @@ def generate_2d_image(mol, highlight_atoms=None, size=(700, 500)):
 def generate_3d_molecule_cached(smiles: str):
     """
     Generate a 3D conformer using ETKDGv3 and optimize geometry with MMFF94 / UFF.
-    Returns (mol_block_str,xyz_str, force_field_name, minimized_energy_kcal).
+    Returns (mol_block_str, xyz_str, force_field_name, minimized_energy_kcal).
     """
     mol = get_molecule(smiles)
     if mol is None:
@@ -630,8 +648,8 @@ def save_3d_structure_png(smiles: str):
     ], dtype=float)
 
     centered = coords - coords.mean(axis=0)
-    if n_atoms >= 3 and np.linalg.matrix_rank(centered) >= 2:
-        _, _, vh = np.linalg.svd(centered, full_matrices=False)
+    if n_atoms >= 2 and np.any(centered):
+        _, _, vh = np.linalg.svd(centered, full_matrices=True)
         projected = centered @ vh[:2].T
     else:
         projected = centered[:, :2]
@@ -774,9 +792,9 @@ def build_key_interpretation_points(properties: dict):
     veb_status = "PASSES" if druglike["veber_pass"] else "VIOLATES"
 
     return [
-        f"<b>• Stoichiometry & Mass:</b> Formula <b>{properties['Molecular Formula']}</b> with average MW <b>{properties['Molecular Weight']} g/mol</b> (Exact Mass: {properties['Exact Molecular Weight']} Da).",
-        f"<b>• Lipophilicity & Polarity:</b> LogP = <b>{properties['LogP']}</b> and TPSA = <b>{properties['TPSA']} Å²</b>, defining partitioning between lipid bilayers and aqueous environments.",
-        f"<b>• Covalent Bonding Architecture:</b> Contains <b>{properties['Sigma (σ) Bonds']} σ bonds</b> and <b>{properties['Pi (π) Bonds']} π bonds</b> (Total: {properties['Total Bonds (σ + π)']}), with C-hybridization distribution (sp³/sp²/sp) of <b>{properties['sp3 / sp2 / sp Carbons']}</b>.",
+        f"<b>• Stoichiometry &amp; Mass:</b> Formula <b>{escape(str(properties['Molecular Formula']))}</b> with average MW <b>{escape(str(properties['Molecular Weight']))} g/mol</b> (Exact Mass: {escape(str(properties['Exact Molecular Weight']))} Da).",
+        f"<b>• Lipophilicity &amp; Polarity:</b> LogP = <b>{escape(str(properties['LogP']))}</b> and TPSA = <b>{escape(str(properties['TPSA']))} Å²</b>, defining partitioning between lipid bilayers and aqueous environments.",
+        f"<b>• Covalent Bonding Architecture:</b> Contains <b>{escape(str(properties['Sigma (σ) Bonds']))} σ bonds</b> and <b>{escape(str(properties['Pi (π) Bonds']))} π bonds</b> (Total: {escape(str(properties['Total Bonds (σ + π)']))}), with C-hybridization distribution (sp³/sp²/sp) of <b>{escape(str(properties['sp3 / sp2 / sp Carbons']))}</b>.",
         f"<b>• Drug-Likeness Screening:</b> The molecule <b>{lip_status} Lipinski's Rule of Five</b> ({druglike['lipinski_violations']} violation(s)) and <b>{veb_status} Veber's Rule</b> for oral bioavailability."
     ]
 
@@ -827,9 +845,24 @@ def generate_multi_final_report(student_name, registration_number, molecule_reco
     ]
 
     meta_data = [
-        ["Student Name", student_name or "Not provided", "Date (UTC)", timestamp_utc],
-        ["Registration No.", registration_number or "Not provided", "Molecules Analyzed", str(len(molecule_records))],
-        ["SHA-256 Audit Seal", audit_hash, "", ""]
+        [
+            Paragraph("<b>Student Name</b>", small_style),
+            Paragraph(escape(student_name or "Not provided"), small_style),
+            Paragraph("<b>Date (UTC)</b>", small_style),
+            Paragraph(escape(timestamp_utc), small_style),
+        ],
+        [
+            Paragraph("<b>Registration No.</b>", small_style),
+            Paragraph(escape(registration_number or "Not provided"), small_style),
+            Paragraph("<b>Molecules Analyzed</b>", small_style),
+            Paragraph(str(len(molecule_records)), small_style),
+        ],
+        [
+            Paragraph("<b>SHA-256 Audit Seal</b>", small_style),
+            Paragraph(f"<font name='Courier' size='6.8'>{escape(audit_hash)}</font>", small_style),
+            "",
+            "",
+        ]
     ]
     meta_table = Table(meta_data, colWidths=[1.3 * inch, 2.2 * inch, 1.3 * inch, 1.9 * inch])
     meta_table.setStyle(TableStyle([
@@ -837,9 +870,11 @@ def generate_multi_final_report(student_name, registration_number, molecule_reco
         ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
         ("BACKGROUND", (0, 0), (0, -1), HexColor("#E2E8F0")),
         ("BACKGROUND", (2, 0), (2, 1), HexColor("#E2E8F0")),
-        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("PADDING", (0, 0), (-1, -1), 5)
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
     ]))
     story += [meta_table, Spacer(1, 0.14 * inch)]
 
@@ -848,7 +883,9 @@ def generate_multi_final_report(student_name, registration_number, molecule_reco
         if index > 1:
             story.append(PageBreak())
 
-        story.append(Paragraph(f"Molecule {index}: {input_smiles} ({properties['Molecular Formula']})", heading_style))
+        safe_smiles = escape(str(input_smiles))
+        safe_formula = escape(str(properties["Molecular Formula"]))
+        story.append(Paragraph(f"Molecule {index}: {safe_smiles} ({safe_formula})", heading_style))
 
         img2d = save_2d_structure_png(mol)
         img3d = save_3d_structure_png(input_smiles)
@@ -870,7 +907,7 @@ def generate_multi_final_report(student_name, registration_number, molecule_reco
             ]))
             story += [struct_table, Spacer(1, 0.08 * inch)]
 
-        story.append(Paragraph("Complete Molecular Descriptors & Chemical Interpretation", heading_style))
+        story.append(Paragraph("Complete Molecular Descriptors &amp; Chemical Interpretation", heading_style))
         prop_data = [[
             Paragraph("<b>Descriptor</b>", header_style),
             Paragraph("<b>Value</b>", header_style),
@@ -878,9 +915,9 @@ def generate_multi_final_report(student_name, registration_number, molecule_reco
         ]]
         for key, value in properties.items():
             prop_data.append([
-                Paragraph(str(key), small_style),
-                Paragraph(str(value), small_style),
-                Paragraph(get_property_interpretation(key, value), small_style)
+                Paragraph(escape(str(key)), small_style),
+                Paragraph(escape(str(value)), small_style),
+                Paragraph(escape(get_property_interpretation(key, value)), small_style)
             ])
 
         prop_table = Table(prop_data, colWidths=[1.6 * inch, 1.0 * inch, 4.1 * inch], repeatRows=1)
@@ -889,11 +926,14 @@ def generate_multi_final_report(student_name, registration_number, molecule_reco
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
             ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("PADDING", (0, 0), (-1, -1), 3.5)
+            ("LEFTPADDING", (0, 0), (-1, -1), 3.5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 3.5),
+            ("TOPPADDING", (0, 0), (-1, -1), 3.5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5),
         ]))
         story += [prop_table, Spacer(1, 0.10 * inch)]
 
-        story.append(Paragraph("Executive Summary & Drug-Likeness Assessment", heading_style))
+        story.append(Paragraph("Executive Summary &amp; Drug-Likeness Assessment", heading_style))
         for point in build_key_interpretation_points(properties):
             story.append(Paragraph(point, body_style))
             story.append(Spacer(1, 0.04 * inch))
@@ -914,6 +954,13 @@ def generate_multi_final_report(student_name, registration_number, molecule_reco
 # ============================================================
 # SIDEBAR NAVIGATION & STUDENT PROFILE
 # ============================================================
+
+example_keys = list(EXAMPLE_MOLECULES.keys())
+current_example_idx = (
+    example_keys.index(st.session_state.selected_example)
+    if st.session_state.selected_example in example_keys
+    else 0
+)
 
 with st.sidebar:
     st.markdown("## 🧪 Cheminformatics Lab `v2.0`")
@@ -941,9 +988,11 @@ with st.sidebar:
     st.markdown("### ⚡ Quick Molecule Switcher")
     st.selectbox(
         "Preset Molecules",
-        list(EXAMPLE_MOLECULES.keys()),
-        key="selected_example",
-        on_change=load_shared_example
+        example_keys,
+        index=current_example_idx,
+        key="sidebar_selected_example",
+        on_change=load_shared_example,
+        args=("sidebar_selected_example",)
     )
     st.caption(f"**Active SMILES:** `{st.session_state.active_smiles}`")
 
@@ -1010,12 +1059,17 @@ if page == "🏠 Home & Overview":
     st.divider()
     fcol1, fcol2 = st.columns([2, 1])
     with fcol1:
-      st.markdown("### 👨‍💻 Developed by")
-st.markdown("**Arun and Sujan**")
-st.markdown("B.Tech CSE with Cybersecurity")
-st.markdown("SRM Institute of Science and Technology, Tiruchirappalli campus")
+        st.markdown("#### 👨‍🏫 Original Curriculum & Concept")
+        st.markdown("""
+        **Dr. R. Subramanian**  
+        Assistant Professor, Division of Chemistry, School of Sciences  
+        Faculty of Engineering and Technology, SRM Institute of Science and Technology, Tiruchirappalli  
+        📧 **Contact:** `rsmani84@gmail.com`
+        """)
     with fcol2:
         st.info("💡 **Tip:** Use the **Quick Molecule Switcher** in the left sidebar or type any custom SMILES string in the laboratory modules.")
+
+
 # ============================================================
 # PAGE 2: THEORY PAGE
 # ============================================================
@@ -1053,7 +1107,7 @@ elif page == "📖 Theory & Concepts":
 
     with t3:
         st.subheader("Lipinski's Rule of Five & Veber's Rule")
-        st.markdown("""
+        st.markdown(r"""
         **Lipinski's Rule of Five (Ro5)** evaluates whether a chemical compound has physicochemical properties consistent with an orally active drug in humans:
         * **Molecular Weight (MW):** $\le 500\text{ g/mol}$
         * **Octanol-Water Partition Coefficient ($\log P$):** $\le 5.0$
@@ -1067,7 +1121,7 @@ elif page == "📖 Theory & Concepts":
 
     with t4:
         st.subheader("3D Conformer Embedding & Morgan Fingerprints")
-        st.markdown("""
+        st.markdown(r"""
         * **ETKDGv3 Algorithm:** Distance-geometry method enriched with experimental torsional angle preferences from crystal structures to generate initial 3D coordinates.
         * **MMFF94 / UFF Minimization:** Merck Molecular Force Field (MMFF94) and Universal Force Field (UFF) relax bond lengths, bond angles, and torsional strain to locate a local energy minimum (reported in $\text{kcal/mol}$).
         * **Morgan Fingerprints (ECFP4):** Circular topological fingerprints (radius 2, 2048 bits) used to quantify structural similarity between two molecules via the **Tanimoto Coefficient** ($T_c \in [0, 1]$).
@@ -1081,15 +1135,23 @@ elif page == "📖 Theory & Concepts":
 elif page == "🧬 2D/3D Visualization & Functional Groups":
     st.title("🧬 2D/3D Molecular Visualization & Substructure Lab")
 
+    st.session_state.smiles_input_widget = st.session_state.active_smiles
     col_in1, col_in2 = st.columns([2.2, 1])
     with col_in1:
-        smiles = st.text_input("Enter SMILES String", key="active_smiles")
+        smiles = st.text_input(
+            "Enter SMILES String",
+            key="smiles_input_widget",
+            on_change=sync_smiles_from_input
+        )
+        st.session_state.active_smiles = smiles
     with col_in2:
         st.selectbox(
             "Or Select Preset Molecule",
-            list(EXAMPLE_MOLECULES.keys()),
-            key="selected_example",
-            on_change=load_shared_example
+            example_keys,
+            index=current_example_idx,
+            key="vis_selected_example",
+            on_change=load_shared_example,
+            args=("vis_selected_example",)
         )
 
     mol = get_molecule(smiles)
@@ -1131,7 +1193,7 @@ elif page == "🧬 2D/3D Visualization & Functional Groups":
 
             st.write(f"**Canonical SMILES:** `{Chem.MolToSmiles(mol)}`")
             st.write(f"**Carbon Hybridization ($sp^3 / sp^2 / sp$):** `{props['sp3 / sp2 / sp Carbons']}`")
-            st.write(f"**Total Bonds ($\sigma + \pi$):** `{props['Total Bonds (σ + π)']}` | **Total Atoms (incl. H):** `{props['Total Atoms (incl. H)']}`")
+            st.write(rf"**Total Bonds ($\sigma + \pi$):** `{props['Total Bonds (σ + π)']}` | **Total Atoms (incl. H):** `{props['Total Atoms (incl. H)']}`")
 
             st.markdown("#### Detected Functional Groups (SMARTS)")
             if fg_dict:
@@ -1213,15 +1275,23 @@ elif page == "🧬 2D/3D Visualization & Functional Groups":
 elif page == "📊 Descriptors & Drug-Likeness Lab":
     st.title("📊 Complete Molecular Descriptors & Drug-Likeness Laboratory")
 
+    st.session_state.smiles_input_widget = st.session_state.active_smiles
     col1, col2 = st.columns([2.2, 1])
     with col1:
-        smiles = st.text_input("Enter SMILES Notation", key="active_smiles")
+        smiles = st.text_input(
+            "Enter SMILES Notation",
+            key="smiles_input_widget",
+            on_change=sync_smiles_from_input
+        )
+        st.session_state.active_smiles = smiles
     with col2:
         st.selectbox(
             "Choose Preset Molecule",
-            list(EXAMPLE_MOLECULES.keys()),
-            key="selected_example",
-            on_change=load_shared_example
+            example_keys,
+            index=current_example_idx,
+            key="desc_selected_example",
+            on_change=load_shared_example,
+            args=("desc_selected_example",)
         )
 
     mol = get_molecule(smiles)
@@ -1400,7 +1470,7 @@ Caffeine,CN1C=NC2=C1C(=O)N(C(=O)N2C)C"""
 
         with vcol2:
             st.subheader("🧬 Morgan Fingerprint (ECFP4) Tanimoto Similarity")
-            fps = [rdMolDescriptors.GetMorganFingerprintAsBitVect(m, radius=2, nBits=2048) for m in mols_valid]
+            fps = [compute_morgan_fp(m, radius=2, n_bits=2048) for m in mols_valid]
             n_mols = len(fps)
             sim_matrix = np.zeros((n_mols, n_mols))
             for i in range(n_mols):
